@@ -56,7 +56,8 @@
         let auth = null;
         let db = null;
 
-        let appId = 'edutka-pro-v4';
+        // Sanitasi App ID
+        let appId = 'edutka-pro-v5';
         if (typeof __app_id !== 'undefined' && __app_id) {
              if (__app_id.includes('/')) appId = __app_id.split('/')[0];
              else appId = __app_id;
@@ -74,7 +75,7 @@
         const INITIAL_ADMIN = { username: 'admin', password: 'TKA*123456*', name: 'Administrator' };
         const { useState, useEffect, useMemo, useRef } = React;
 
-        // --- KOMPONEN IKON SVG ---
+        // --- KOMPONEN IKON SVG (Lebih Elegan) ---
         const Icon = ({ name, size = 20, className = "" }) => {
             const icons = {
                 dashboard: <path d="M3 3h7v7H3zM14 3h7v7h-7zM14 14h7v7h-7zM3 14h7v7H3z"/>,
@@ -95,7 +96,8 @@
                 trash: <g><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></g>,
                 loading: <g><path d="M12 2v4"/><path d="m16.2 7.8 2.9-2.9"/><path d="M18 12h4"/><path d="m16.2 16.2 2.9 2.9"/><path d="M12 18v4"/><path d="m4.9 19.1 2.9-2.9"/><path d="M2 12h4"/><path d="m4.9 4.9 2.9 2.9"/></g>,
                 book: <><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></>,
-                clock: <circle cx="12" cy="12" r="10"/>
+                clock: <circle cx="12" cy="12" r="10"/>,
+                db: <g><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></g>
             };
             return (
                 <svg xmlns="http://www.w3.org/2000/svg" width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}>
@@ -205,12 +207,92 @@
                 try {
                     const ref = db.collection('artifacts').doc(appId).collection('public').doc('data').collection(collectionName);
                     const snapshot = await ref.get();
-                    const batch = db.batch();
-                    snapshot.docs.forEach(doc => batch.delete(doc.ref));
-                    await batch.commit();
-                    notify(`Data ${collectionName} berhasil direset.`);
-                } catch (e) { console.error(e); notify("Gagal reset.", "error"); }
+                    
+                    if (snapshot.size === 0) {
+                        notify("Data sudah kosong.");
+                        setLoading(false);
+                        return;
+                    }
+
+                    // Hapus data dalam batch kecil (maks 400 per batch) untuk menghindari limit Firestore
+                    const batchSize = 400;
+                    let batch = db.batch();
+                    let count = 0;
+                    let batchCommits = [];
+
+                    snapshot.docs.forEach((doc, i) => {
+                        batch.delete(doc.ref);
+                        count++;
+                        if (count === batchSize) {
+                            batchCommits.push(batch.commit());
+                            batch = db.batch();
+                            count = 0;
+                        }
+                    });
+
+                    // Commit sisa data
+                    if (count > 0) {
+                        batchCommits.push(batch.commit());
+                    }
+
+                    // Tunggu semua proses selesai
+                    await Promise.all(batchCommits);
+                    notify(`Berhasil mereset ${snapshot.size} data ${collectionName}.`);
+
+                } catch (e) { 
+                    console.error("Reset Error:", e);
+                    if (e.code === 'permission-denied') {
+                        alert("GAGAL RESET: Izin ditolak oleh Firebase.\n\nSolusi: Buka Firebase Console > Firestore Database > Rules.\nUbah 'allow delete: if false' menjadi 'allow delete: if true'.");
+                    } else {
+                        notify("Gagal reset data. Cek koneksi.", "error"); 
+                    }
+                }
                 setLoading(false);
+            };
+
+            // --- BACKUP DATA ---
+            const handleBackupData = async () => {
+                if(!db) return;
+                setLoading(true);
+                try {
+                    const collections = ['exams', 'results', 'students', 'violations'];
+                    const backupData = {};
+                    for(const col of collections) {
+                        const snap = await db.collection('artifacts').doc(appId).collection('public').doc('data').collection(col).get();
+                        backupData[col] = snap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                    }
+                    const json = JSON.stringify(backupData, null, 2);
+                    const blob = new Blob([json], {type: "application/json"});
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a'); a.href = url; a.download = `Backup_EduTKA_${new Date().toISOString().slice(0,10)}.json`; a.click();
+                    notify("Backup data berhasil diunduh.");
+                } catch(e) { console.error(e); notify("Gagal membuat backup.", "error"); }
+                setLoading(false);
+            };
+
+            // --- RESTORE DATA ---
+            const handleRestoreData = async (file) => {
+                if(!db || !file) return;
+                if(!confirm("PERINGATAN: Restore akan menimpa/menambah data ke database. Lanjutkan?")) return;
+                setLoading(true);
+                const reader = new FileReader();
+                reader.onload = async (e) => {
+                    try {
+                        const data = JSON.parse(e.target.result);
+                        const collections = ['exams', 'results', 'students', 'violations'];
+                        for(const col of collections) {
+                            if(data[col] && Array.isArray(data[col])) {
+                                for(const item of data[col]) {
+                                    const { id, ...docData } = item;
+                                    await db.collection('artifacts').doc(appId).collection('public').doc('data').collection(col).doc(id).set(docData);
+                                }
+                            }
+                        }
+                        notify("Data berhasil direstore!");
+                    } catch(err) { console.error(err); notify("File backup tidak valid atau rusak.", "error"); }
+                    setLoading(false);
+                };
+                reader.readAsText(file);
             };
 
             if (!firebaseUser && loading) return <div className="h-screen flex flex-col gap-4 items-center justify-center text-indigo-600 font-bold text-xl"><Icon name="loading" size={48} className="animate-spin"/><p>Menghubungkan ke EduTKA...</p></div>;
@@ -228,7 +310,8 @@
                     {view === 'admin' && (
                         <AdminPortal 
                             user={user} onLogout={handleLogout} exams={exams} results={results} violations={violations} 
-                            onAddExam={handleAddExam} onDeleteExam={handleDeleteExam} onResetData={handleResetData} notify={notify}
+                            onAddExam={handleAddExam} onDeleteExam={handleDeleteExam} onResetData={handleResetData}
+                            onBackup={handleBackupData} onRestore={handleRestoreData} notify={notify}
                         />
                     )}
                     {view === 'student' && (
@@ -245,7 +328,7 @@
         function LoginScreen({ onLogin, notify, db, appId }) {
             const [role, setRole] = useState('student');
             const [isRegister, setIsRegister] = useState(false);
-            const [formData, setFormData] = useState({ id: '', name: '', password: '' });
+            const [formData, setFormData] = useState({ id: '', name: '', password: '', class: '' }); 
             const [loading, setLoading] = useState(false);
 
             const handleSubmit = async (e) => {
@@ -259,15 +342,20 @@
                     const studentsRef = db.collection('artifacts').doc(appId).collection('public').doc('data').collection('students');
                     try {
                         const snapshot = await studentsRef.where("nis", "==", formData.id).get();
+                        // CEK KUOTA PENDAFTAR (LIMIT 223)
+                        const allStudentsSnap = await studentsRef.get(); 
+                        if (isRegister && allStudentsSnap.size >= 223) {
+                            notify("Pendaftaran PENUH! Kuota 223 siswa telah tercapai.", "error"); setLoading(false); return;
+                        }
                         if (isRegister) {
                             if (!snapshot.empty) notify("NISN sudah terdaftar. Silakan login.", "error");
-                            else { await studentsRef.add({ nis: formData.id, name: formData.name }); notify("Berhasil daftar! Silakan login."); setIsRegister(false); }
+                            else { await studentsRef.add({ nis: formData.id, name: formData.name, class: formData.class }); notify("Berhasil daftar! Silakan login."); setIsRegister(false); }
                         } else {
                             if (snapshot.empty) notify("NISN belum terdaftar.", "error");
                             else {
                                 const data = snapshot.docs[0].data();
                                 if (data.name.toLowerCase() !== formData.name.toLowerCase()) notify("Nama tidak sesuai NISN.", "error");
-                                else onLogin('student', { nis: formData.id, name: formData.name });
+                                else onLogin('student', { nis: formData.id, name: formData.name, class: data.class || '-' });
                             }
                         }
                     } catch (err) { notify("Gagal koneksi database", "error"); }
@@ -279,36 +367,25 @@
                 <div className="flex items-center justify-center min-h-screen bg-gradient-to-br from-indigo-900 via-purple-900 to-indigo-900 p-4">
                     <div className="bg-white/10 backdrop-blur-lg rounded-2xl shadow-2xl w-full max-w-4xl flex flex-col md:flex-row overflow-hidden border border-white/10 animate-fade-in">
                         <div className="md:w-1/2 p-12 flex flex-col justify-center items-center text-white text-center bg-indigo-600/20">
-                            <div className="w-24 h-24 bg-white/20 rounded-full flex items-center justify-center mb-6 shadow-inner">
-                                <Icon name="book" size={48} className="text-white"/>
-                            </div>
+                            <div className="w-24 h-24 bg-white/20 rounded-full flex items-center justify-center mb-6 shadow-inner"><Icon name="book" size={48} className="text-white"/></div>
                             <h1 className="text-4xl font-bold mb-2">EduTKA Pro</h1>
                             <p className="text-indigo-200 text-lg">Platform Ujian Online Terintegrasi</p>
                         </div>
-                        
                         <div className="md:w-1/2 p-10 bg-white">
-                            <h2 className="text-2xl font-bold text-slate-800 mb-6 flex items-center gap-2">
-                                {role === 'admin' ? 'Login Admin' : (isRegister ? 'Daftar Akun' : 'Login Siswa')}
-                            </h2>
-                            
+                            <h2 className="text-2xl font-bold text-slate-800 mb-6 flex items-center gap-2">{role === 'admin' ? 'Login Admin' : (isRegister ? 'Daftar Akun' : 'Login Siswa')}</h2>
                             <div className="flex bg-slate-100 p-1 rounded-lg mb-6">
                                 <button onClick={() => setRole('student')} className={`flex-1 py-2 rounded-md text-sm font-bold transition-all ${role === 'student' ? 'bg-white shadow text-indigo-600' : 'text-slate-500'}`}>Siswa</button>
                                 <button onClick={() => setRole('admin')} className={`flex-1 py-2 rounded-md text-sm font-bold transition-all ${role === 'admin' ? 'bg-white shadow text-indigo-600' : 'text-slate-500'}`}>Admin</button>
                             </div>
-
                             <form onSubmit={handleSubmit} className="space-y-4">
-                                <div>
-                                    <label className="block text-xs font-bold text-slate-500 uppercase mb-1">{role === 'admin' ? 'Username' : 'NISN'}</label>
-                                    <input type="text" value={formData.id} onChange={e => setFormData({...formData, id: e.target.value})} className="w-full p-3 bg-slate-50 border border-slate-200 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none transition-all" required placeholder={role === 'admin' ? 'admin' : 'Contoh: 12345'}/>
-                                </div>
-                                {role === 'admin' ? (
-                                    <div><label className="block text-xs font-bold text-slate-500 uppercase mb-1">Password</label><input type="password" value={formData.password} onChange={e => setFormData({...formData, password: e.target.value})} className="w-full p-3 bg-slate-50 border border-slate-200 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none transition-all" required placeholder="***"/></div>
-                                ) : (
-                                    <div><label className="block text-xs font-bold text-slate-500 uppercase mb-1">Nama Lengkap</label><input type="text" value={formData.name} onChange={e => setFormData({...formData, name: e.target.value})} className="w-full p-3 bg-slate-50 border border-slate-200 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none transition-all" required placeholder="Nama Siswa"/></div>
+                                <div><label className="block text-xs font-bold text-slate-500 uppercase mb-1">{role === 'admin' ? 'Username' : 'NISN'}</label><input type="text" value={formData.id} onChange={e => setFormData({...formData, id: e.target.value})} className="w-full p-3 bg-slate-50 border border-slate-200 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none transition-all" required placeholder={role === 'admin' ? 'admin' : 'Contoh: 12345'}/></div>
+                                {role === 'admin' ? (<div><label className="block text-xs font-bold text-slate-500 uppercase mb-1">Password</label><input type="password" value={formData.password} onChange={e => setFormData({...formData, password: e.target.value})} className="w-full p-3 bg-slate-50 border border-slate-200 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none transition-all" required placeholder="***"/></div>) : (
+                                    <>
+                                        <div><label className="block text-xs font-bold text-slate-500 uppercase mb-1">Nama Lengkap</label><input type="text" value={formData.name} onChange={e => setFormData({...formData, name: e.target.value})} className="w-full p-3 bg-slate-50 border border-slate-200 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none transition-all" required placeholder="Nama Siswa"/></div>
+                                        {isRegister && (<div><label className="block text-xs font-bold text-slate-500 uppercase mb-1">Kelas</label><input type="text" value={formData.class} onChange={e => setFormData({...formData, class: e.target.value})} className="w-full p-3 bg-slate-50 border border-slate-200 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none transition-all" required placeholder="Contoh: 9A"/></div>)}
+                                    </>
                                 )}
-                                <button type="submit" disabled={loading} className="w-full bg-indigo-600 text-white font-bold py-3 rounded-lg hover:bg-indigo-700 transition-colors disabled:opacity-50 shadow-lg shadow-indigo-200">
-                                    {loading ? 'Memproses...' : (role === 'admin' ? 'Masuk Dashboard' : (isRegister ? 'Buat Akun Baru' : 'Masuk Ujian'))}
-                                </button>
+                                <button type="submit" disabled={loading} className="w-full bg-indigo-600 text-white font-bold py-3 rounded-lg hover:bg-indigo-700 transition-colors disabled:opacity-50 shadow-lg shadow-indigo-200">{loading ? 'Memproses...' : (role === 'admin' ? 'Masuk Dashboard' : (isRegister ? 'Buat Akun Baru' : 'Masuk Ujian'))}</button>
                             </form>
                             {role === 'student' && (<p className="text-center mt-6 text-sm text-slate-500 cursor-pointer hover:text-indigo-600 font-medium" onClick={() => setIsRegister(!isRegister)}>{isRegister ? 'Sudah punya akun? Login' : 'Belum punya akun? Daftar'}</p>)}
                         </div>
@@ -318,9 +395,10 @@
         }
 
         // --- ADMIN PORTAL ---
-        function AdminPortal({ user, onLogout, exams, results, violations, onAddExam, onDeleteExam, onResetData, notify }) {
+        function AdminPortal({ user, onLogout, exams, results, violations, onAddExam, onDeleteExam, onResetData, onBackup, onRestore, notify }) {
             const [tab, setTab] = useState('dashboard');
             const [newExam, setNewExam] = useState(null);
+            const restoreInputRef = useRef(null);
 
             const stats = useMemo(() => {
                 const totalStudents = new Set(results.map(r => r.studentId)).size;
@@ -333,7 +411,7 @@
             const downloadExcel = () => {
                 const data = results.map(r => {
                     const vCount = violations.filter(v => v.studentId === r.studentId && v.examId === r.examId).length;
-                    return {"Nama": r.studentName, "NISN": r.studentId, "Paket": r.examTitle, "Nilai": r.score, "Tanggal": r.date, "Status": r.score >= 70 ? "Lulus" : "Remedial", "Pelanggaran": vCount > 0 ? `${vCount}x` : "Aman"};
+                    return {"Nama": r.studentName, "Kelas": r.studentClass || '-', "NISN": r.studentId, "Paket": r.examTitle, "Nilai": r.score, "Tanggal": r.date, "Status": r.score >= 70 ? "Lulus" : "Remedial", "Pelanggaran": vCount > 0 ? `${vCount}x` : "Aman"};
                 });
                 const ws = XLSX.utils.json_to_sheet(data);
                 const wb = XLSX.utils.book_new();
@@ -349,96 +427,38 @@
                             <div className="text-xs text-slate-400 mt-1 uppercase font-bold tracking-wider">Admin Control</div>
                         </div>
                         <nav className="flex-1 p-4 space-y-2 overflow-y-auto custom-scrollbar">
-                            {[
-                                {id: 'dashboard', label: 'Dashboard', icon: 'dashboard'},
-                                {id: 'exams', label: 'Kelola Soal', icon: 'file'},
-                                {id: 'results', label: 'Rekap Nilai', icon: 'users'},
-                                {id: 'settings', label: 'Pengaturan', icon: 'settings'}
-                            ].map(item => (
-                                <button key={item.id} onClick={() => setTab(item.id)} className={`w-full text-left px-4 py-3 rounded-xl flex items-center gap-3 transition-all ${tab === item.id ? 'bg-indigo-50 text-indigo-700 font-bold shadow-sm ring-1 ring-indigo-200' : 'text-slate-600 hover:bg-slate-50'}`}>
-                                    <Icon name={item.icon} size={18}/> {item.label}
-                                </button>
+                            {[{id: 'dashboard', label: 'Dashboard', icon: 'dashboard'}, {id: 'exams', label: 'Kelola Soal', icon: 'file'}, {id: 'results', label: 'Rekap Nilai', icon: 'users'}, {id: 'settings', label: 'Pengaturan', icon: 'settings'}].map(item => (
+                                <button key={item.id} onClick={() => setTab(item.id)} className={`w-full text-left px-4 py-3 rounded-xl flex items-center gap-3 transition-all ${tab === item.id ? 'bg-indigo-50 text-indigo-700 font-bold shadow-sm ring-1 ring-indigo-200' : 'text-slate-600 hover:bg-slate-50'}`}><Icon name={item.icon} size={18}/> {item.label}</button>
                             ))}
                         </nav>
-                        <div className="p-4 border-t border-slate-100">
-                            <button onClick={onLogout} className="w-full flex items-center gap-3 px-4 py-3 text-red-600 hover:bg-red-50 rounded-xl font-medium transition-colors"><Icon name="logout" size={18}/> Keluar</button>
-                        </div>
+                        <div className="p-4 border-t border-slate-100"><button onClick={onLogout} className="w-full flex items-center gap-3 px-4 py-3 text-red-600 hover:bg-red-50 rounded-xl font-medium transition-colors"><Icon name="logout" size={18}/> Keluar</button></div>
                     </aside>
-
                     <main className="flex-1 overflow-auto bg-slate-50 relative">
-                        {/* Header Background */}
                         <div className="h-48 bg-gradient-to-r from-indigo-600 to-purple-600 absolute top-0 left-0 w-full z-0"></div>
-                        
                         <div className="relative z-10 p-8">
                             <div className="mb-8 text-white flex justify-between items-end">
-                                <div>
-                                    <h2 className="text-3xl font-bold">Halo, {user.name}</h2>
-                                    <p className="opacity-90">Berikut ringkasan aktivitas ujian hari ini.</p>
-                                </div>
-                                <div className="text-sm bg-white/20 backdrop-blur px-4 py-2 rounded-full font-medium">
-                                    {new Date().toLocaleDateString('id-ID', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}
-                                </div>
+                                <div><h2 className="text-3xl font-bold">Halo, {user.name}</h2><p className="opacity-90">Berikut ringkasan aktivitas ujian hari ini.</p></div>
+                                <div className="text-sm bg-white/20 backdrop-blur px-4 py-2 rounded-full font-medium">{new Date().toLocaleDateString('id-ID', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}</div>
                             </div>
-
                             {tab === 'dashboard' && (
                                 <div className="space-y-6 animate-fade-in">
-                                    {/* Stats Cards */}
                                     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-                                        {[
-                                            { label: "Total Peserta", val: stats.totalStudents, icon: "users", color: "blue" },
-                                            { label: "Total Ujian", val: stats.totalExams, icon: "file", color: "purple" },
-                                            { label: "Rata-rata Nilai", val: stats.avgScore, icon: "trending", color: "orange" },
-                                            { label: "Tingkat Kelulusan", val: `${stats.passRate}%`, icon: "check", color: "emerald" },
-                                        ].map((s, i) => (
-                                            <div key={i} className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100 flex items-center gap-4 hover:shadow-md transition-shadow">
-                                                <div className={`w-14 h-14 rounded-full flex items-center justify-center bg-${s.color}-50 text-${s.color}-600`}>
-                                                    <Icon name={s.icon} size={24}/>
-                                                </div>
-                                                <div>
-                                                    <div className="text-slate-500 text-xs uppercase font-bold tracking-wider">{s.label}</div>
-                                                    <div className="text-2xl font-bold text-slate-800">{s.val}</div>
-                                                </div>
-                                            </div>
+                                        {[{ label: "Total Peserta", val: stats.totalStudents, icon: "users", color: "blue" }, { label: "Total Ujian", val: stats.totalExams, icon: "file", color: "purple" }, { label: "Rata-rata Nilai", val: stats.avgScore, icon: "trending", color: "orange" }, { label: "Tingkat Kelulusan", val: `${stats.passRate}%`, icon: "check", color: "emerald" }].map((s, i) => (
+                                            <div key={i} className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100 flex items-center gap-4 hover:shadow-md transition-shadow"><div className={`w-14 h-14 rounded-full flex items-center justify-center bg-${s.color}-50 text-${s.color}-600`}><Icon name={s.icon} size={24}/></div><div><div className="text-slate-500 text-xs uppercase font-bold tracking-wider">{s.label}</div><div className="text-2xl font-bold text-slate-800">{s.val}</div></div></div>
                                         ))}
                                     </div>
-
                                     <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-                                        {/* Chart Placeholder */}
                                         <div className="lg:col-span-2 bg-white p-6 rounded-2xl shadow-sm border border-slate-100 h-96 flex flex-col">
                                             <h3 className="font-bold text-lg mb-6 flex items-center gap-2 text-slate-700"><Icon name="chart"/> Analisis Nilai (Live)</h3>
                                             <div className="flex-1 flex items-end gap-2 border-b border-l border-slate-100 p-4">
-                                                {results.slice(0, 20).map((r, i) => (
-                                                    <div key={i} className="flex-1 bg-indigo-500 hover:bg-indigo-600 rounded-t relative group transition-all" style={{height: `${r.score}%`}}>
-                                                        <div className="absolute -top-10 left-1/2 -translate-x-1/2 bg-black text-white text-xs px-2 py-1 rounded opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap z-10">{r.studentName}: {r.score}</div>
-                                                    </div>
-                                                ))}
+                                                {results.slice(0, 20).map((r, i) => (<div key={i} className="flex-1 bg-indigo-500 hover:bg-indigo-600 rounded-t relative group transition-all" style={{height: `${r.score}%`}}><div className="absolute -top-10 left-1/2 -translate-x-1/2 bg-black text-white text-xs px-2 py-1 rounded opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap z-10">{r.studentName}: {r.score}</div></div>))}
                                                 {results.length === 0 && <div className="w-full text-center text-slate-400 self-center">Belum ada data nilai masuk.</div>}
                                             </div>
                                         </div>
-
-                                        {/* Violations Feed */}
                                         <div className="bg-white rounded-2xl shadow-sm border border-slate-100 overflow-hidden flex flex-col h-96">
-                                            <div className="p-4 border-b border-slate-100 flex justify-between items-center bg-red-50/50">
-                                                <h3 className="font-bold text-red-700 flex items-center gap-2"><Icon name="shield"/> Live Pelanggaran</h3>
-                                                <span className="bg-red-100 text-red-700 text-xs font-bold px-2 py-1 rounded-full">{violations.length}</span>
-                                            </div>
+                                            <div className="p-4 border-b border-slate-100 flex justify-between items-center bg-red-50/50"><h3 className="font-bold text-red-700 flex items-center gap-2"><Icon name="shield"/> Live Pelanggaran</h3><span className="bg-red-100 text-red-700 text-xs font-bold px-2 py-1 rounded-full">{violations.length}</span></div>
                                             <div className="flex-1 overflow-y-auto p-4 space-y-3 custom-scrollbar">
-                                                {violations.length === 0 ? (
-                                                    <div className="h-full flex flex-col items-center justify-center text-slate-400 text-center text-sm p-6">
-                                                        <div className="w-16 h-16 bg-emerald-50 rounded-full flex items-center justify-center text-emerald-500 mb-3"><Icon name="check" size={32}/></div>
-                                                        <p>Tidak ada aktivitas mencurigakan.</p>
-                                                    </div>
-                                                ) : (
-                                                    violations.map((v, i) => (
-                                                        <div key={i} className="p-3 rounded-xl bg-red-50 border border-red-100 text-sm">
-                                                            <div className="flex justify-between font-bold text-slate-800">
-                                                                <span className="truncate">{v.studentName}</span>
-                                                                <span className="text-red-500 text-xs shrink-0">{new Date(v.timestamp).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}</span>
-                                                            </div>
-                                                            <div className="text-slate-500 text-xs mt-1">{v.type === 'switch_tab' ? 'Meninggalkan Aplikasi' : 'Perilaku Mencurigakan'}</div>
-                                                        </div>
-                                                    ))
-                                                )}
+                                                {violations.length === 0 ? (<div className="h-full flex flex-col items-center justify-center text-slate-400 text-center text-sm p-6"><div className="w-16 h-16 bg-emerald-50 rounded-full flex items-center justify-center text-emerald-500 mb-3"><Icon name="check" size={32}/></div><p>Tidak ada aktivitas mencurigakan.</p></div>) : (violations.map((v, i) => (<div key={i} className="p-3 rounded-xl bg-red-50 border border-red-100 text-sm"><div className="flex justify-between font-bold text-slate-800"><span className="truncate">{v.studentName}</span><span className="text-red-500 text-xs shrink-0">{new Date(v.timestamp).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}</span></div><div className="text-slate-500 text-xs mt-1">{v.type === 'switch_tab' ? 'Meninggalkan Aplikasi' : 'Perilaku Mencurigakan'}</div></div>)))}
                                             </div>
                                         </div>
                                     </div>
@@ -453,21 +473,13 @@
                                     </div>
                                     <div className="overflow-x-auto rounded-lg border border-slate-100">
                                         <table className="w-full text-sm text-left">
-                                            <thead className="bg-slate-50 text-slate-500 uppercase text-xs font-bold"><tr><th className="p-4">Nama Siswa</th><th className="p-4">Paket Soal</th><th className="p-4">Nilai</th><th className="p-4">Status</th><th className="p-4">Pelanggaran</th></tr></thead>
+                                            <thead className="bg-slate-50 text-slate-500 uppercase text-xs font-bold"><tr><th className="p-4">Nama Siswa</th><th className="p-4">Kelas</th><th className="p-4">Paket Soal</th><th className="p-4">Nilai</th><th className="p-4">Status</th><th className="p-4">Pelanggaran</th></tr></thead>
                                             <tbody className="divide-y divide-slate-100">
                                                 {results.map(r => {
                                                     const vCount = violations.filter(v => v.studentId === r.studentId && v.examId === r.examId).length;
-                                                    return (
-                                                        <tr key={r.id} className="hover:bg-slate-50/50 transition-colors">
-                                                            <td className="p-4 font-medium text-slate-700">{r.studentName} <br/><span className="text-xs text-slate-400 font-normal">{r.studentId}</span></td>
-                                                            <td className="p-4 text-slate-500">{r.examTitle}</td>
-                                                            <td className="p-4 font-bold text-lg text-indigo-600">{r.score}</td>
-                                                            <td className="p-4"><span className={`px-3 py-1 rounded-full text-xs font-bold ${r.score >= 70 ? 'bg-emerald-100 text-emerald-700' : 'bg-red-100 text-red-700'}`}>{r.score >= 70 ? 'Lulus' : 'Remedial'}</span></td>
-                                                            <td className="p-4">{vCount > 0 ? <span className="bg-red-50 text-red-600 px-3 py-1 rounded-full text-xs font-bold flex items-center gap-1 w-fit border border-red-100"><Icon name="alert" size={14}/> {vCount}x</span> : <span className="text-emerald-500 flex items-center gap-1 text-xs font-medium"><Icon name="check" size={14}/> Bersih</span>}</td>
-                                                        </tr>
-                                                    );
+                                                    return (<tr key={r.id} className="hover:bg-slate-50/50 transition-colors"><td className="p-4 font-medium text-slate-700">{r.studentName} <br/><span className="text-xs text-slate-400 font-normal">{r.studentId}</span></td><td className="p-4 text-slate-600">{r.studentClass || '-'}</td><td className="p-4 text-slate-500">{r.examTitle}</td><td className="p-4 font-bold text-lg text-indigo-600">{r.score}</td><td className="p-4"><span className={`px-3 py-1 rounded-full text-xs font-bold ${r.score >= 70 ? 'bg-emerald-100 text-emerald-700' : 'bg-red-100 text-red-700'}`}>{r.score >= 70 ? 'Lulus' : 'Remedial'}</span></td><td className="p-4">{vCount > 0 ? <span className="bg-red-50 text-red-600 px-3 py-1 rounded-full text-xs font-bold flex items-center gap-1 w-fit border border-red-100"><Icon name="alert" size={14}/> {vCount}x</span> : <span className="text-emerald-500 flex items-center gap-1 text-xs font-medium"><Icon name="check" size={14}/> Bersih</span>}</td></tr>);
                                                 })}
-                                                {results.length === 0 && <tr><td colSpan="5" className="p-8 text-center text-slate-400 italic">Belum ada data nilai.</td></tr>}
+                                                {results.length === 0 && <tr><td colSpan="6" className="p-8 text-center text-slate-400 italic">Belum ada data nilai.</td></tr>}
                                             </tbody>
                                         </table>
                                     </div>
@@ -479,57 +491,31 @@
                                     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
                                         {exams.map(e => (
                                             <div key={e.id} className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100 hover:shadow-md transition-all group relative">
-                                                <div className="flex justify-between items-start mb-4">
-                                                    <div className="w-10 h-10 bg-indigo-50 text-indigo-600 rounded-lg flex items-center justify-center"><Icon name="file"/></div>
-                                                    <button onClick={() => onDeleteExam(e.id)} className="text-slate-300 hover:text-red-500 transition-colors"><Icon name="trash"/></button>
-                                                </div>
-                                                <h3 className="font-bold text-lg text-slate-800 mb-1">{e.title}</h3>
-                                                <p className="text-sm text-slate-500 mb-4">Kode: <span className="font-mono bg-slate-100 px-1 rounded text-slate-600">{e.code}</span></p>
-                                                <div className="flex items-center gap-4 text-xs text-slate-400 font-medium">
-                                                    <span className="flex items-center gap-1"><Icon name="clock" size={14}/> {e.duration} Menit</span>
-                                                    <span className="flex items-center gap-1"><Icon name="file" size={14}/> {e.questions.length} Soal</span>
-                                                </div>
+                                                <div className="flex justify-between items-start mb-4"><div className="w-10 h-10 bg-indigo-50 text-indigo-600 rounded-lg flex items-center justify-center"><Icon name="file"/></div><button onClick={() => onDeleteExam(e.id)} className="text-slate-300 hover:text-red-500 transition-colors"><Icon name="trash"/></button></div>
+                                                <h3 className="font-bold text-lg text-slate-800 mb-1">{e.title}</h3><p className="text-sm text-slate-500 mb-4">Kode: <span className="font-mono bg-slate-100 px-1 rounded text-slate-600">{e.code}</span></p>
+                                                <div className="flex items-center gap-4 text-xs text-slate-400 font-medium"><span className="flex items-center gap-1"><Icon name="clock" size={14}/> {e.duration} Menit</span><span className="flex items-center gap-1"><Icon name="file" size={14}/> {e.questions.length} Soal</span></div>
                                             </div>
                                         ))}
-                                        <button onClick={() => setNewExam({ title: '', code: '', duration: 60, questions: [] })} className="bg-slate-50 border-2 border-dashed border-slate-200 rounded-2xl flex flex-col items-center justify-center p-6 text-slate-400 hover:border-indigo-400 hover:text-indigo-500 hover:bg-indigo-50/50 transition-all min-h-[200px]">
-                                            <div className="w-12 h-12 bg-white rounded-full shadow-sm flex items-center justify-center mb-3"><Icon name="plus" size={24}/></div>
-                                            <span className="font-bold">Buat Paket Baru</span>
-                                        </button>
+                                        <button onClick={() => setNewExam({ title: '', code: '', duration: 60, questions: [] })} className="bg-slate-50 border-2 border-dashed border-slate-200 rounded-2xl flex flex-col items-center justify-center p-6 text-slate-400 hover:border-indigo-400 hover:text-indigo-500 hover:bg-indigo-50/50 transition-all min-h-[200px]"><div className="w-12 h-12 bg-white rounded-full shadow-sm flex items-center justify-center mb-3"><Icon name="plus" size={24}/></div><span className="font-bold">Buat Paket Baru</span></button>
                                     </div>
-                                    
-                                    {newExam && (
-                                        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4 animate-fade-in">
-                                            <div className="w-full max-w-4xl max-h-[90vh] overflow-y-auto custom-scrollbar">
-                                                <ExamEditor exam={newExam} onSave={(e) => { onAddExam(e); setNewExam(null); }} onCancel={() => setNewExam(null)} notify={notify}/>
-                                            </div>
-                                        </div>
-                                    )}
+                                    {newExam && (<div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4 animate-fade-in"><div className="w-full max-w-4xl max-h-[90vh] overflow-y-auto custom-scrollbar"><ExamEditor exam={newExam} onSave={(e) => { onAddExam(e); setNewExam(null); }} onCancel={() => setNewExam(null)} notify={notify}/></div></div>)}
                                 </div>
                             )}
 
                             {tab === 'settings' && (
                                 <div className="bg-white rounded-2xl shadow-sm border border-slate-100 p-8 animate-fade-in max-w-3xl mx-auto">
-                                    <h2 className="font-bold text-2xl mb-2 text-slate-800">Pengaturan Data</h2>
-                                    <p className="text-slate-500 mb-8">Kelola dan bersihkan data sistem.</p>
-                                    
+                                    <h2 className="font-bold text-2xl mb-2 text-slate-800">Pengaturan Data</h2><p className="text-slate-500 mb-8">Kelola dan bersihkan data sistem.</p>
                                     <div className="space-y-6">
+                                        <div className="p-6 bg-indigo-50 rounded-xl border border-indigo-100">
+                                            <h3 className="font-bold text-indigo-800 flex items-center gap-2 mb-2"><Icon name="db"/> Backup & Restore</h3><p className="text-sm text-indigo-600/80 mb-6">Unduh data untuk cadangan atau pulihkan dari file JSON.</p>
+                                            <div className="flex gap-4"><button onClick={onBackup} className="flex-1 bg-white border border-indigo-200 text-indigo-600 px-4 py-3 rounded-lg text-sm hover:bg-indigo-100 font-bold transition-colors flex items-center justify-center gap-2"><Icon name="download"/> Download Backup</button><button onClick={() => restoreInputRef.current.click()} className="flex-1 bg-indigo-600 text-white px-4 py-3 rounded-lg text-sm hover:bg-indigo-700 font-bold shadow-lg shadow-indigo-200 transition-colors flex items-center justify-center gap-2"><Icon name="upload"/> Restore Data</button><input type="file" ref={restoreInputRef} onChange={(e) => onRestore(e.target.files[0])} hidden accept=".json" /></div>
+                                        </div>
                                         <div className="p-6 bg-red-50 rounded-xl border border-red-100">
-                                            <h3 className="font-bold text-red-800 flex items-center gap-2 mb-2"><Icon name="alert"/> Zona Berbahaya</h3>
-                                            <p className="text-sm text-red-600/80 mb-6">Tindakan ini bersifat permanen dan tidak dapat dibatalkan.</p>
-                                            
+                                            <h3 className="font-bold text-red-800 flex items-center gap-2 mb-2"><Icon name="alert"/> Zona Berbahaya</h3><p className="text-sm text-red-600/80 mb-6">Tindakan ini bersifat permanen dan tidak dapat dibatalkan.</p>
                                             <div className="space-y-4">
-                                                <div className="flex justify-between items-center p-4 bg-white rounded-lg border border-red-100">
-                                                    <div><div className="font-bold text-slate-800">Reset Nilai Ujian</div><div className="text-xs text-slate-500">Hapus {results.length} data nilai.</div></div>
-                                                    <button onClick={() => onResetData('results')} className="bg-white border border-red-200 text-red-600 px-4 py-2 rounded-lg text-sm hover:bg-red-50 font-bold transition-colors">Hapus</button>
-                                                </div>
-                                                <div className="flex justify-between items-center p-4 bg-white rounded-lg border border-red-100">
-                                                    <div><div className="font-bold text-slate-800">Reset Log Pelanggaran</div><div className="text-xs text-slate-500">Hapus {violations.length} log.</div></div>
-                                                    <button onClick={() => onResetData('violations')} className="bg-white border border-red-200 text-red-600 px-4 py-2 rounded-lg text-sm hover:bg-red-50 font-bold transition-colors">Hapus</button>
-                                                </div>
-                                                <div className="flex justify-between items-center p-4 bg-white rounded-lg border border-red-100">
-                                                    <div><div className="font-bold text-slate-800">Reset Akun Siswa</div><div className="text-xs text-slate-500">Hapus semua akun terdaftar.</div></div>
-                                                    <button onClick={() => onResetData('students')} className="bg-red-600 text-white px-4 py-2 rounded-lg text-sm hover:bg-red-700 font-bold shadow-lg shadow-red-200 transition-colors">Hapus Semua</button>
-                                                </div>
+                                                <div className="flex justify-between items-center p-4 bg-white rounded-lg border border-red-100"><div><div className="font-bold text-slate-800">Reset Nilai Ujian</div><div className="text-xs text-slate-500">Hapus {results.length} data nilai.</div></div><button onClick={() => onResetData('results')} className="bg-white border border-red-200 text-red-600 px-4 py-2 rounded-lg text-sm hover:bg-red-50 font-bold transition-colors">Hapus</button></div>
+                                                <div className="flex justify-between items-center p-4 bg-white rounded-lg border border-red-100"><div><div className="font-bold text-slate-800">Reset Log Pelanggaran</div><div className="text-xs text-slate-500">Hapus {violations.length} log.</div></div><button onClick={() => onResetData('violations')} className="bg-white border border-red-200 text-red-600 px-4 py-2 rounded-lg text-sm hover:bg-red-50 font-bold transition-colors">Hapus</button></div>
+                                                <div className="flex justify-between items-center p-4 bg-white rounded-lg border border-red-100"><div><div className="font-bold text-slate-800">Reset Akun Siswa</div><div className="text-xs text-slate-500">Hapus semua akun terdaftar.</div></div><button onClick={() => onResetData('students')} className="bg-red-600 text-white px-4 py-2 rounded-lg text-sm hover:bg-red-700 font-bold shadow-lg shadow-red-200 transition-colors">Hapus Semua</button></div>
                                             </div>
                                         </div>
                                         <div className="text-xs text-center text-slate-400 font-mono pt-4">App ID: {appId} • v2.0 Pro</div>
@@ -549,10 +535,10 @@
             const fileInputRef = useRef(null);
 
             const downloadTemplate = () => {
-                const ws_data = [["Tipe (single/complex)", "Pertanyaan", "URL Gambar", "Opsi A", "Opsi B", "Opsi C", "Opsi D", "Jawaban Benar (1,2,3,4)"], ["single", "Apa ibukota Indonesia?", "", "Bandung", "Jakarta", "Surabaya", "Medan", "2"], ["complex", "Pilih bilangan prima", "", "2", "4", "9", "11", "1,4"]];
+                const ws_data = [["Tipe (single/complex/truth/agree/relevant)", "Pertanyaan", "URL Gambar", "Opsi A", "Opsi B", "Opsi C", "Opsi D", "Jawaban Benar (1,2,3,4)"], ["single", "Apa ibukota Indonesia?", "", "Bandung", "Jakarta", "Surabaya", "Medan", "2"], ["truth", "Pilih Benar/Salah", "", "Pernyataan 1", "Pernyataan 2", "Pernyataan 3", "Pernyataan 4", "1,3"], ["agree", "Pilih Setuju/Tidak", "", "Pernyataan A", "Pernyataan B", "", "", "1"]];
                 const wb = XLSX.utils.book_new();
                 const ws = XLSX.utils.aoa_to_sheet(ws_data);
-                ws['!cols'] = [{wch:15}, {wch:40}, {wch:20}, {wch:15}, {wch:15}, {wch:15}, {wch:15}, {wch:25}];
+                ws['!cols'] = [{wch:25}, {wch:40}, {wch:20}, {wch:15}, {wch:15}, {wch:15}, {wch:15}, {wch:25}];
                 XLSX.utils.book_append_sheet(wb, ws, "Template");
                 XLSX.writeFile(wb, "Template_Soal.xlsx");
             };
@@ -569,11 +555,18 @@
                         for(let i=1; i<json.length; i++) {
                             const row = json[i];
                             if(!row || row.length < 2) continue; 
+                            let type = 'single';
+                            const t = (row[0]||'').toString().toLowerCase();
+                            if(t.includes('complex')) type='complex';
+                            else if(t.includes('truth')) type='truth';
+                            else if(t.includes('agree')) type='agree';
+                            else if(t.includes('relevant')) type='relevant';
+                            
                             const correctIndices = (row[7] || '').toString().split(/[\s,]+/).map(x=>parseInt(x)).filter(x=>!isNaN(x));
                             newQs.push({
-                                id: Date.now() + i, type: (row[0] && row[0].toLowerCase().includes('complex')) ? 'complex' : 'single',
+                                id: Date.now() + i, type: type,
                                 text: row[1] || '', image: row[2] || '',
-                                options: [1,2,3,4].map(idx => ({ id: idx, text: (row[2+idx]||'').toString(), isCorrect: correctIndices.includes(idx) }))
+                                options: [1,2,3,4].map(idx => ({ id: idx, text: (row[2+idx]||'').toString(), isCorrect: correctIndices.includes(idx), image: '' }))
                             });
                         }
                         setData(prev => ({ ...prev, questions: [...prev.questions, ...newQs] }));
@@ -584,32 +577,58 @@
                 e.target.value = null;
             };
 
-            const addQ = () => { setData({ ...data, questions: [...data.questions, { id: Date.now(), text: '', type: 'single', options: [{id:1, text:'', isCorrect:false},{id:2, text:'', isCorrect:false},{id:3, text:'', isCorrect:false},{id:4, text:'', isCorrect:false}] }] }); setQIndex(data.questions.length); };
+            const addQ = () => { setData({ ...data, questions: [...data.questions, { id: Date.now(), text: '', type: 'single', image: '', options: [{id:1, text:'', isCorrect:false, image:''},{id:2, text:'', isCorrect:false, image:''},{id:3, text:'', isCorrect:false, image:''},{id:4, text:'', isCorrect:false, image:''}] }] }); setQIndex(data.questions.length); };
             const updateQ = (idx, field, val) => { const qs = [...data.questions]; qs[idx][field] = val; setData({...data, questions: qs}); };
-            const updateOpt = (qIdx, oIdx, val) => { const qs = [...data.questions]; qs[qIdx].options[oIdx].text = val; setData({...data, questions: qs}); };
-            const toggleCorrect = (qIdx, oIdx) => { const qs = [...data.questions]; if (qs[qIdx].type === 'single') qs[qIdx].options.forEach((o, i) => o.isCorrect = i === oIdx); else qs[qIdx].options[oIdx].isCorrect = !qs[qIdx].options[oIdx].isCorrect; setData({...data, questions: qs}); };
+            const updateOpt = (qIdx, oIdx, field, val) => { const qs = [...data.questions]; qs[qIdx].options[oIdx][field] = val; setData({...data, questions: qs}); };
+            const toggleCorrect = (qIdx, oIdx) => { 
+                const qs = [...data.questions]; 
+                const type = qs[qIdx].type;
+                if (type === 'single') qs[qIdx].options.forEach((o, i) => o.isCorrect = i === oIdx); 
+                else if (['truth','agree','relevant'].includes(type)) qs[qIdx].options[oIdx].isCorrect = !qs[qIdx].options[oIdx].isCorrect; 
+                else qs[qIdx].options[oIdx].isCorrect = !qs[qIdx].options[oIdx].isCorrect; 
+                setData({...data, questions: qs}); 
+            };
 
             if (qIndex !== null) {
                 const q = data.questions[qIndex];
+                const getColHeader = (t) => {
+                    if(t==='truth') return 'Benar';
+                    if(t==='agree') return 'Setuju';
+                    if(t==='relevant') return 'Relevan';
+                    return 'Benar';
+                }
+
                 return (
                     <div className="bg-white p-6 rounded-2xl shadow-xl animate-fade-in">
-                        <div className="flex justify-between font-bold mb-4 items-center">
+                        <div className="flex flex-wrap justify-between font-bold mb-4 items-center gap-2">
                             <span className="text-lg">Edit Soal #{qIndex+1}</span> 
                             <button onClick={() => setQIndex(null)} className="text-indigo-600 bg-indigo-50 px-3 py-1 rounded-lg hover:bg-indigo-100 transition-colors">Selesai</button>
                         </div>
                         <div className="space-y-4">
-                            <select value={q.type} onChange={e => updateQ(qIndex, 'type', e.target.value)} className="p-3 border rounded-xl w-full bg-slate-50 focus:ring-2 focus:ring-indigo-500 outline-none"><option value="single">Pilihan Ganda Tunggal</option><option value="complex">Pilihan Ganda Kompleks</option></select>
+                            <select value={q.type} onChange={e => updateQ(qIndex, 'type', e.target.value)} className="p-3 border rounded-xl w-full bg-slate-50 focus:ring-2 focus:ring-indigo-500 outline-none">
+                                <option value="single">Pilihan Ganda Tunggal</option>
+                                <option value="complex">Pilihan Ganda Kompleks</option>
+                                <option value="truth">PG Kompleks - Benar/Salah</option>
+                                <option value="agree">PG Kompleks - Setuju/Tidak Setuju</option>
+                                <option value="relevant">PG Kompleks - Relevan/Tidak Relevan</option>
+                            </select>
                             <textarea value={q.text} onChange={e => updateQ(qIndex, 'text', e.target.value)} className="w-full p-3 border rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none" placeholder="Tulis pertanyaan disini..." rows={3}/>
                             <div className="flex flex-col sm:flex-row gap-2">
-                                <input value={q.image || ''} onChange={e => updateQ(qIndex, 'image', e.target.value)} className="flex-1 p-3 border rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none" placeholder="Link Gambar (Opsional)..." />
+                                <input value={q.image || ''} onChange={e => updateQ(qIndex, 'image', e.target.value)} className="flex-1 p-3 border rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none" placeholder="Link Gambar Soal (Opsional)..." />
                                 {q.image && <img src={q.image} className="h-12 w-12 object-cover rounded-lg border bg-slate-50"/>}
                             </div>
                             <div className="space-y-3 pt-2">
-                                <p className="text-xs font-bold text-slate-400 uppercase">Pilihan Jawaban</p>
+                                <p className="text-xs font-bold text-slate-400 uppercase">
+                                    {['truth','agree','relevant'].includes(q.type) ? `Pernyataan (${getColHeader(q.type)}?)` : 'Pilihan Jawaban'}
+                                </p>
                                 {q.options.map((opt, i) => (
-                                    <div key={i} className="flex items-center gap-3">
-                                        <button onClick={() => toggleCorrect(qIndex, i)} className={`w-8 h-8 rounded-full border flex items-center justify-center transition-all shrink-0 ${opt.isCorrect ? 'bg-emerald-500 text-white border-emerald-500 shadow-md shadow-emerald-200' : 'bg-white hover:bg-slate-50'}`}>{opt.isCorrect && <Icon name="check" size={16}/>}</button>
-                                        <input value={opt.text} onChange={e => updateOpt(qIndex, i, e.target.value)} className="flex-1 p-3 border rounded-xl text-sm focus:ring-2 focus:ring-indigo-500 outline-none w-0 min-w-0" placeholder={`Opsi ${String.fromCharCode(65+i)}`}/>
+                                    <div key={i} className="flex flex-col sm:flex-row items-start sm:items-center gap-3 border p-3 rounded-lg bg-slate-50/50">
+                                        <button onClick={() => toggleCorrect(qIndex, i)} className={`w-8 h-8 rounded-full border flex items-center justify-center transition-all shrink-0 ${opt.isCorrect ? 'bg-emerald-500 text-white border-emerald-500 shadow-md shadow-emerald-200' : 'bg-white hover:bg-slate-50'}`} title={opt.isCorrect ? "Jawaban Benar" : "Tandai Benar"}>{opt.isCorrect && <Icon name="check" size={16}/>}</button>
+                                        <div className="flex-1 w-full space-y-2">
+                                            <input value={opt.text} onChange={e => updateOpt(qIndex, i, 'text', e.target.value)} className="w-full p-2 border rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 outline-none" placeholder={`Opsi ${String.fromCharCode(65+i)}`}/>
+                                            <input value={opt.image || ''} onChange={e => updateOpt(qIndex, i, 'image', e.target.value)} className="w-full p-2 border rounded-lg text-xs text-slate-500 focus:ring-1 focus:ring-indigo-300 outline-none" placeholder="Link Gambar Opsi (Opsional)..."/>
+                                        </div>
+                                        {opt.image && <img src={opt.image} className="h-10 w-10 object-cover rounded border bg-white self-center sm:self-start"/>}
                                     </div>
                                 ))}
                             </div>
@@ -637,7 +656,6 @@
                             </div>
                         </div>
                     </div>
-                    
                     <div className="border-t border-slate-100 pt-6">
                         <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-4 gap-3">
                             <div className="font-bold text-slate-700">Daftar Soal ({data.questions.length})</div>
@@ -647,7 +665,6 @@
                                 <input type="file" ref={fileInputRef} onChange={handleImport} hidden accept=".xlsx, .xls" />
                             </div>
                         </div>
-                        
                         <div className="space-y-2 mb-6 max-h-80 overflow-auto custom-scrollbar pr-2 bg-slate-50 p-2 rounded-xl border border-slate-100">
                             {data.questions.map((q, i) => (
                                 <div key={i} className="group relative p-3 bg-white border border-slate-200 rounded-lg hover:shadow-md transition-all flex justify-between items-center">
@@ -660,10 +677,8 @@
                             ))}
                             {data.questions.length === 0 && <div className="text-center text-slate-400 py-8 italic flex flex-col items-center"><Icon name="file" size={32} className="mb-2 opacity-50"/>Belum ada soal.</div>}
                         </div>
-                        
                         <button onClick={addQ} className="w-full py-3 border-2 border-dashed border-indigo-200 text-indigo-600 rounded-xl text-sm font-bold hover:bg-indigo-50 hover:border-indigo-300 transition-all flex items-center justify-center gap-2"><Icon name="plus" size={18}/> Tambah Soal Manual</button>
                     </div>
-                    
                     <div className="flex gap-4 pt-8 mt-4 border-t border-slate-100">
                         <button onClick={onCancel} className="flex-1 py-3 border border-slate-200 text-slate-600 rounded-xl font-bold hover:bg-slate-50 transition-colors">Batal</button>
                         <button onClick={() => onSave(data)} className="flex-1 py-3 bg-indigo-600 text-white rounded-xl font-bold hover:bg-indigo-700 shadow-lg shadow-indigo-200 transition-colors">Simpan Paket</button>
@@ -687,7 +702,7 @@
             };
 
             if (mode === 'run') return <ExamRunner user={user} exam={activeExam} onReport={onReportViolation} onFinish={async (score) => {
-                const success = await onSubmitResult({ studentId: user.nis, studentName: user.name, examId: activeExam.id, examTitle: activeExam.title, score, date: new Date().toLocaleDateString() });
+                const success = await onSubmitResult({ studentId: user.nis, studentName: user.name, studentClass: user.class, examId: activeExam.id, examTitle: activeExam.title, score, date: new Date().toLocaleDateString() });
                 if (success) setMode('done');
             }} />;
 
@@ -760,10 +775,26 @@
             const [ans, setAns] = useState({});
             const [time, setTime] = useState(exam.duration * 60);
             const [submitting, setSubmitting] = useState(false);
+            const violationCountRef = useRef(0);
 
             useEffect(() => {
-                const handleVis = () => { if (document.hidden) { onReport({ type: 'switch_tab', studentId: user.nis, studentName: user.name, examId: exam.id, examTitle: exam.title }); alert("⚠️ PERINGATAN SISTEM KEAMANAN!\n\nAnda terdeteksi meninggalkan halaman ujian.\nAktivitas ini telah dicatat dan dilaporkan."); } };
-                document.addEventListener("visibilitychange", handleVis); return () => document.removeEventListener("visibilitychange", handleVis);
+                const handleVis = () => { 
+                    if (document.hidden) { 
+                        violationCountRef.current += 1;
+                        const currentCount = violationCountRef.current;
+                        
+                        onReport({ type: 'switch_tab', studentId: user.nis, studentName: user.name, studentClass: user.class, examId: exam.id, examTitle: exam.title }); 
+                        
+                        if (currentCount >= 3) {
+                            alert("PELANGGARAN TERAKHIR! Sistem mendeteksi Anda keluar aplikasi sebanyak 3 kali. Ujian akan dihentikan dan jawaban dikumpulkan otomatis.");
+                            submit(); 
+                        } else {
+                            alert(`PERINGATAN PELANGGARAN (${currentCount}/3)!\n\nAnda terdeteksi keluar dari aplikasi ujian.\nJika mencapai 3 kali, ujian akan dihentikan paksa.`);
+                        }
+                    } 
+                };
+                document.addEventListener("visibilitychange", handleVis); 
+                return () => document.removeEventListener("visibilitychange", handleVis);
             }, []);
 
             useEffect(() => {
@@ -774,21 +805,30 @@
             const select = (qId, type, optId) => {
                 const cur = ans[qId] || [];
                 if (type === 'single') setAns({ ...ans, [qId]: [optId] });
+                else if (['truth','agree','relevant'].includes(type)) setAns({ ...ans, [qId]: cur.includes(optId) ? cur.filter(i => i !== optId) : [...cur, optId] });
                 else setAns({ ...ans, [qId]: cur.includes(optId) ? cur.filter(i => i !== optId) : [...cur, optId] });
             };
 
             const submit = async () => {
-                if (!submitting && (time <= 0 || confirm("Apakah Anda yakin ingin mengumpulkan jawaban?"))) {
+                if (!submitting) {
                     setSubmitting(true);
                     let correct = 0;
                     exam.questions.forEach(q => {
                         const uAns = ans[q.id] || []; const kAns = q.options.filter(o => o.isCorrect).map(o => o.id);
                         if (q.type === 'single' && uAns[0] === kAns[0]) correct++;
                         else if (q.type === 'complex' && JSON.stringify(uAns.sort()) === JSON.stringify(kAns.sort())) correct++;
+                        else if (['truth','agree','relevant'].includes(q.type) && JSON.stringify(uAns.sort()) === JSON.stringify(kAns.sort())) correct++;
                     });
                     await onFinish(Math.round((correct / exam.questions.length) * 100));
                 }
             };
+
+            const getColHeader = (t) => {
+                if(t==='truth') return 'Benar?';
+                if(t==='agree') return 'Setuju?';
+                if(t==='relevant') return 'Relevan?';
+                return 'Pilih';
+            }
 
             return (
                 <div className="flex flex-col h-screen bg-slate-50">
@@ -807,7 +847,8 @@
                             <Icon name="shield" size={20} className="mt-0.5 text-red-600 shrink-0"/>
                             <div>
                                 <strong className="block mb-1 text-red-700">Mode Ujian Aman Aktif</strong>
-                                Dilarang berpindah tab, membuka aplikasi lain, atau meminimalkan browser. Pelanggaran akan tercatat otomatis.
+                                Dilarang berpindah tab atau membuka aplikasi lain. 
+                                <br/>Pelanggaran ke-3 akan menyebabkan ujian terkunci otomatis.
                             </div>
                         </div>
 
@@ -821,17 +862,45 @@
                                     </div>
                                 </div>
                                 <div className="space-y-3 pl-14">
-                                    {q.options.map(opt => {
-                                        const sel = (ans[q.id] || []).includes(opt.id);
-                                        return (
-                                            <div key={opt.id} onClick={() => select(q.id, q.type, opt.id)} className={`p-4 border-2 rounded-xl cursor-pointer flex items-center gap-4 transition-all ${sel ? 'bg-indigo-50 border-indigo-600 shadow-md ring-1 ring-indigo-600' : 'border-slate-100 hover:bg-slate-50 hover:border-slate-300'}`}>
-                                                <div className={`w-6 h-6 rounded-full border-2 flex items-center justify-center transition-colors ${sel ? 'bg-indigo-600 border-indigo-600' : 'bg-white border-slate-300'}`}>
-                                                    {sel && <div className="w-2.5 h-2.5 bg-white rounded-full"/>}
-                                                </div>
-                                                <span className="text-slate-700 font-medium">{opt.text}</span>
+                                    {['truth','agree','relevant'].includes(q.type) ? (
+                                        <div className="grid gap-2">
+                                            <div className="grid grid-cols-4 font-bold text-sm bg-slate-100 p-3 rounded-t-lg">
+                                                <div className="col-span-3">Pernyataan</div>
+                                                <div className="text-center">{getColHeader(q.type)}</div>
                                             </div>
-                                        );
-                                    })}
+                                            {q.options.map(opt => {
+                                                const isMarked = (ans[q.id] || []).includes(opt.id);
+                                                return (
+                                                    <div key={opt.id} className="grid grid-cols-4 items-center border-b p-3 last:border-0 hover:bg-slate-50">
+                                                        <div className="col-span-3 text-sm flex items-center gap-3">
+                                                            {opt.image && <img src={opt.image} className="h-10 w-10 object-cover rounded border bg-white"/>}
+                                                            <span>{opt.text}</span>
+                                                        </div>
+                                                        <div className="flex justify-center">
+                                                            <button onClick={() => select(q.id, q.type, opt.id)} className={`w-6 h-6 rounded border flex items-center justify-center transition-all ${isMarked ? 'bg-indigo-600 border-indigo-600 text-white' : 'bg-white'}`}>
+                                                                {isMarked && <Icon name="check" size={14}/>}
+                                                            </button>
+                                                        </div>
+                                                    </div>
+                                                );
+                                            })}
+                                        </div>
+                                    ) : (
+                                        q.options.map(opt => {
+                                            const sel = (ans[q.id] || []).includes(opt.id);
+                                            return (
+                                                <div key={opt.id} onClick={() => select(q.id, q.type, opt.id)} className={`p-4 border-2 rounded-xl cursor-pointer flex items-center gap-4 transition-all ${sel ? 'bg-indigo-50 border-indigo-600 shadow-md ring-1 ring-indigo-600' : 'border-slate-100 hover:bg-slate-50 hover:border-slate-300'}`}>
+                                                    <div className={`w-6 h-6 rounded-full border-2 flex items-center justify-center transition-colors shrink-0 ${sel ? 'bg-indigo-600 border-indigo-600' : 'bg-white border-slate-300'}`}>
+                                                        {sel && <div className="w-2.5 h-2.5 bg-white rounded-full"/>}
+                                                    </div>
+                                                    <div className="flex-1">
+                                                        {opt.image && <img src={opt.image} className="mb-2 max-h-32 rounded border bg-white"/>}
+                                                        <span className="text-slate-700 font-medium">{opt.text}</span>
+                                                    </div>
+                                                </div>
+                                            );
+                                        })
+                                    )}
                                 </div>
                             </div>
                         ))}
@@ -839,7 +908,7 @@
                     
                     <div className="fixed bottom-0 left-0 w-full bg-white border-t border-slate-200 p-4 z-20">
                         <div className="max-w-4xl mx-auto">
-                            <button onClick={submit} disabled={submitting} className="w-full bg-emerald-600 text-white font-bold py-4 rounded-xl shadow-lg shadow-emerald-200 hover:bg-emerald-700 disabled:bg-slate-300 disabled:shadow-none transition-all flex justify-center items-center gap-2">
+                            <button onClick={() => { if(confirm("Kumpulkan jawaban sekarang?")) submit(); }} disabled={submitting} className="w-full bg-emerald-600 text-white font-bold py-4 rounded-xl shadow-lg shadow-emerald-200 hover:bg-emerald-700 disabled:bg-slate-300 disabled:shadow-none transition-all flex justify-center items-center gap-2">
                                 {submitting ? <><Icon name="loading" className="animate-spin"/> Mengirim Jawaban...</> : "Selesai & Kumpulkan Jawaban"}
                             </button>
                         </div>
@@ -852,5 +921,4 @@
         root.render(<App />);
     </script>
 </body>
-
 </html>
